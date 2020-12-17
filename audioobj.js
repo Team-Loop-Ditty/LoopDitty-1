@@ -67,6 +67,13 @@ class AudioObj {
     }
 
     /**
+     * An unrolled Float32Array of times 
+     */
+    getTimesArray() {
+        return flatten32(this.times);
+    }
+
+    /**
      * An unrolled Float32Array of colors 
      */
     getColorsArray() {
