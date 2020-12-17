@@ -34,11 +34,13 @@ class LoopDittyCanvas extends BaseCanvas {
         let gui = new dat.GUI();
         this.gui = gui;
         this.displayOptsFolder = gui.addFolder("Display Options");
-        // TODO make this more user friendly
-        // should also cache audio data so changing render options doesn't require recalculation
-        this.pointScale = 0.0005;
-        this.displayOptsFolder.add(this, "pointScale", 0.0, 0.001, 0.0001);
-
+        let redrawDisplay = function() {
+            requestAnimationFrame(canvas.repaint.bind(canvas));
+        };
+        this.pointInflateAmount = 0.0;
+        this.displayOptsFolder.add(this, "pointInflateAmount", 0.0, 5.0, 0.25).listen().onChange(redrawDisplay);
+        this.disablePoints = false;
+        this.displayOptsFolder.add(this, "disablePoints").listen().onChange(redrawDisplay);
         this.audioFolder = gui.addFolder("Audio Options");
         this.songName = "Untitled";
         this.audioFolder.add(this, "songName");
@@ -92,10 +94,12 @@ class LoopDittyCanvas extends BaseCanvas {
      */
     setupShaders() {
         this.vertexVBO = -1;
+        this.normalVBO = -1;
         this.lineVBO = -1;
         this.lineColorVBO = -1;
         this.pointColorVBO = -1;
         this.timeVBO = -1   // New time VBO
+        this.icosMesh = [];
         let canvas = this;
         this.shader = getShaderProgramAsync(canvas.gl, "shaders/lineSegments");
         this.shader.then(function(shader) {
@@ -103,14 +107,16 @@ class LoopDittyCanvas extends BaseCanvas {
             shader.description = 'A shader for drawing lines with a constant color';
             shader.vPosAttrib = gl.getAttribLocation(shader, "vPos");
             gl.enableVertexAttribArray(shader.vPosAttrib);
+            shader.vNormalAttrib = gl.getAttribLocation(shader, "vNormal");
+            gl.enableVertexAttribArray(shader.vNormalAttrib);
             shader.vColorAttrib = gl.getAttribLocation(shader, "vColor");
             gl.enableVertexAttribArray(shader.vColorAttrib);
             shader.vTimeAttrib = gl.getAttribLocation(shader, "vTime");     // New time attribute
             gl.enableVertexAttribArray(shader.vTimeAttrib);
             shader.pMatrixUniform = gl.getUniformLocation(shader, "uPMatrix");
             shader.mvMatrixUniform = gl.getUniformLocation(shader, "uMVMatrix");
-            shader.pointSizeUniform = gl.getUniformLocation(shader, "uPointSize");
             shader.timeUniform = gl.getUniformLocation(shader, "uTime");    // New time uniform
+            shader.inflateUniform = gl.getUniformLocation(shader, "uInflate");
             shader.shaderReady = true;
             canvas.shader = shader;
         });
@@ -197,22 +203,52 @@ class LoopDittyCanvas extends BaseCanvas {
                     canvas.vertexVBO = canvas.gl.createBuffer();
                 }
 
-                let icos = getIcosahedronMesh();
+                if (canvas.icosMesh.length == 0) {
+                    canvas.icosMesh = getIcosahedronMesh();
+                    for (let v of canvas.icosMesh.vertices) {
+                        v.pos = glMatrix.vec3.scale(v.pos, v.pos, 0.0005);
+                    }
+                }
+
+                let icos = canvas.icosMesh;
                 let ind = icos.getTriangleIndices();
                 let verts = new Float32Array(X.length * ind.length); // X.length / 3 * ind.length * 3
-                let i = 0;
                 for (let i = 0; i < N; ++i) {
                     for (let k = 0; k < ind.length; ++k) {
                         let p = icos.vertices[ind[k]].pos;
-                        verts[i * ind.length * 3 + k * 3] = p[0] * canvas.pointScale + X[i * 3];
-                        verts[i * ind.length * 3 + k * 3 + 1] = p[1] * canvas.pointScale + X[i * 3 + 1];
-                        verts[i * ind.length * 3 + k * 3 + 2] = p[2] * canvas.pointScale + X[i * 3 + 2];
+                        verts[i * ind.length * 3 + k * 3] = p[0] + X[i * 3];
+                        verts[i * ind.length * 3 + k * 3 + 1] = p[1] + X[i * 3 + 1];
+                        verts[i * ind.length * 3 + k * 3 + 2] = p[2] + X[i * 3 + 2];
                     }
                 }
                 canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.vertexVBO);
                 canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, verts, canvas.gl.STATIC_DRAW);
                 canvas.vertexVBO.itemSize = 3;
                 canvas.vertexVBO.numItems = N * ind.length;
+
+                if (canvas.normalVBO == -1) {
+                    canvas.normalVBO = canvas.gl.createBuffer();
+                }
+
+                let normals = new Float32Array(X.length * ind.length);
+                let normList = [];
+                for (let i = 0; i < icos.vertices.length; ++i) {
+                    normList[i] = icos.vertices[i].getNormal();
+                }
+
+                for (let i = 0; i < N; ++i) {
+                    for (let k = 0; k < ind.length; ++k) {
+                        let n = normList[ind[k]];
+                        normals[i * ind.length * 3 + k * 3] = n[0];
+                        normals[i * ind.length * 3 + k * 3 + 1] = n[1];
+                        normals[i * ind.length * 3 + k * 3 + 2] = n[2];
+                    }
+                }
+                
+                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.normalVBO);
+                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, normals, canvas.gl.STATIC_DRAW);
+                canvas.normalVBO.itemSize = 3;
+                canvas.normalVBO.numItems = N * ind.length;
 
                 if (canvas.lineVBO == -1) {
                     canvas.lineVBO = canvas.gl.createBuffer();
@@ -292,11 +328,11 @@ class LoopDittyCanvas extends BaseCanvas {
             // Wait until the promise has resolved, then draw again
             this.shader.then(canvas.repaint.bind(canvas));
         }
-        else if (this.vertexVBO != -1 && this.lineVBO != -1 && this.pointColorVBO != -1 && this.lineColorVBO != -1 && playIdx > this.delayOpts.winLength - 1) {
+        else if (this.vertexVBO != -1 && this.normalVBO != -1 && this.lineVBO != -1 && this.pointColorVBO != -1 && this.lineColorVBO != -1 && playIdx > this.delayOpts.winLength - 1) {
             this.gl.useProgram(this.shader);
             this.gl.uniformMatrix4fv(this.shader.pMatrixUniform, false, this.camera.getPMatrix());
             this.gl.uniformMatrix4fv(this.shader.mvMatrixUniform, false, this.camera.getMVMatrix());
-            this.gl.uniform1f(this.shader.pointSizeUniform, 3.0);
+            this.gl.uniform1f(this.shader.inflateUniform, this.pointInflateAmount);
             //Setup time uniform for line segment fadeout animation
             this.thisTime = (new Date()).getTime();
             this.time += (this.thisTime - this.lastTime)/1000.0;
@@ -304,24 +340,35 @@ class LoopDittyCanvas extends BaseCanvas {
             this.gl.uniform1f(this.shader.timeUniform, this.time);
 
             //Step 1: Draw all points unsaturated
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexVBO);
-            this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.vertexVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointColorVBO);
-            this.gl.vertexAttribPointer(this.shader.vColorAttrib, this.pointColorVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-            this.gl.drawArrays(this.gl.TRIANGLES, 0, (playIdx - this.delayOpts.winLength + 1) * 60); // 60 = 20 triangles * 3 vertices
+            if (!this.disablePoints) {
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexVBO);
+                this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.vertexVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalVBO);
+                this.gl.vertexAttribPointer(this.shader.vNormalAttrib, this.normalVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointColorVBO);
+                this.gl.vertexAttribPointer(this.shader.vColorAttrib, this.pointColorVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+                this.gl.drawArrays(this.gl.TRIANGLES, 0, (playIdx - this.delayOpts.winLength) * 60 - 60); // 60 = 20 triangles * 3 vertices
+            }
+
             //Draw "time edge" lines between points
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.lineVBO);
             this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.lineVBO.itemSize, this.gl.FLOAT, false, 0, 0);
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.lineColorVBO);
             this.gl.vertexAttribPointer(this.shader.vColorAttrib, this.lineColorVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.gl.uniform1f(this.shader.inflateUniform, 0.0);
             // this gave me webgl warnings before by going out of bounds by at least 1 - is this right now?
             this.gl.drawArrays(this.gl.LINES, 0, playIdx - this.delayOpts.winLength);
             this.gl.drawArrays(this.gl.LINES, 1, playIdx - this.delayOpts.winLength);
     
             //Step 2: Draw the current point as a larger point
-            // TODO implement shader uniform and such for this
-            //this.gl.uniform1f(this.shader.pointSizeUniform, 15.0);
-            //this.gl.drawArrays(this.gl.POINTS, playIdx, 1);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexVBO);
+            this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.vertexVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalVBO);
+            this.gl.vertexAttribPointer(this.shader.vNormalAttrib, this.normalVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointColorVBO);
+            this.gl.vertexAttribPointer(this.shader.vColorAttrib, this.pointColorVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.gl.uniform1f(this.shader.inflateUniform, this.pointInflateAmount + 2.5);
+            this.gl.drawArrays(this.gl.TRIANGLES, (playIdx - this.delayOpts.winLength) * 60, 60);
         }
     }
 
