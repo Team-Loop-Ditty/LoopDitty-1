@@ -70,7 +70,7 @@ class AudioObj {
      * An unrolled Float32Array of times 
      */
     getTimesArray() {
-        return flatten32(this.times);
+        return Float32Array.from(this.times);
     }
 
     /**

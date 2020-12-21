@@ -1,7 +1,9 @@
 precision mediump float;
+
+uniform float uTime;
+
 varying vec3 fColor;
-//varying float fTime;
-//uniform float uTime;
+varying float fTime;
 
 void main(void) {
     //Warm to cold color gradient (default)
