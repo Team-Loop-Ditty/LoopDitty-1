@@ -15,8 +15,8 @@ void main(void) {
     //gl_FragColor = vec4(fColor.zyx*fColor.zyx*0.95, 1.0);     //Reverse Dim Saturated
 
     gl_FragColor = vec4(fColor.zyx*fColor.zyx/0.5, 1.0);
-    if (uTime/5.0 > fTime && fTime > 0.0) {
-        gl_FragColor = vec4(vec3(0.0, 0.0, 0.0), 1.0);  // For testing purposes only. Not the final effect.
+    if (uTime/5.0 > fTime && fTime > 0.0) { // Replace 5.0 with larger values for a slower fadeout.
         //gl_FragColor = vec4(fColor*fColor/0.5, 1.0);
+        discard; // Completely remove line segments and vertices
     }
 }
