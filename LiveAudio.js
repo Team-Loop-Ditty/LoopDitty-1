@@ -8,6 +8,16 @@
  let hopSize = 1024;
  let melNumBands = 96;
 
+ let time = 0;
+ let spectrogram = [];
+ let hpcpGram = [];
+ let colors = [];
+ let times = [];
+ let processedAudio;
+ let r = 1;
+ let g = 0.1;
+ let b = 0.1;
+ 
  try {
    const AudioContext = window.AudioContext || window.webkitAudioContext;
    audioCtx = new AudioContext();
@@ -29,6 +39,7 @@
    onProcessCallback,
    btnCallback
  ) {
+   processedAudio = '';
    // cross-browser support for getUserMedia
    navigator.getUserMedia =
      navigator.getUserMedia ||
@@ -49,7 +60,7 @@
              "Audio context sample rate = " + audioCtx.sampleRate
            );
            var mic = audioCtx.createMediaStreamSource(stream);
-          
+
            // In most platforms where the sample rate is 44.1 kHz or 48 kHz,
            // and the default bufferSize will be 4096, giving 10-12 updates/sec.
            console.log("Buffer size = " + bufferSize);
@@ -95,29 +106,17 @@
    );
    isPlotting = false;
    audioCtx.suspend();
+    
+   //Create JSON object when recording stops
+   processedAudio = {'audio': '', 'times': times, 'features':{'chroma':hpcpGram, 'mfcc':spectrogram}, 'colors':colors};
+   console.log(processedAudio);
  }
 
- // ScriptNodeProcessor callback function to extract pitchyin feature using essentia.js and plotting it on the front-end
- function melSpectrumFeatureExtractor(event) {
 
+function featureExtractor(event){
     let audioBuffer = event.inputBuffer.getChannelData(0);
 
-    // modifying default extractor settings
-    essentiaExtractor.frameSize = bufferSize;
-    essentiaExtractor.hopSize = hopSize;
-    // settings specific to an algorithm
-    essentiaExtractor.profile.MelBands.numberBands = melNumBands;
-    // compute hpcp for overlapping frames of audio
-    let spectrum = essentiaExtractor.melSpectrumExtractor(audioBuffer, audioCtx.sampleRate);
-    let spectrogram = [];
-    spectrogram.push(spectrum);
- }
-
-// ScriptNodeProcessor callback function to extract pitchyin feature using essentia.js and plotting it on the front-end
-function hpcpFeatureExtractor(event) {
-
-    let audioBuffer = event.inputBuffer.getChannelData(0);
-
+    //HPCP****************************************/
     // modifying default extractor settings
     essentiaExtractor.frameSize = 4096;
     essentiaExtractor.hopSize = hopSize;
@@ -126,6 +125,65 @@ function hpcpFeatureExtractor(event) {
     essentiaExtractor.profile.HPCP.nonLinear = true;
     // compute hpcp for overlapping frames of audio
     let hpcp = essentiaExtractor.hpcpExtractor(audioBuffer);
-    let hpcpGram = [];
     hpcpGram.push(hpcp);
+    //console.log("hpcp");
+    //******************************************/
+
+    //MELSPECTRUM**********************************/
+    // modifying default extractor settings
+    essentiaExtractor.frameSize = bufferSize;
+    essentiaExtractor.hopSize = hopSize;
+    // settings specific to an algorithm
+    essentiaExtractor.profile.MelBands.numberBands = melNumBands;
+    // compute hpcp for overlapping frames of audio
+    let spectrum = essentiaExtractor.melSpectrumExtractor(audioBuffer, audioCtx.sampleRate);
+    spectrogram.push(spectrum);
+    //console.log("spectrum");
+    //**************************************************************/
+
+    colors.push([r,g,b,1]);
+    times.push(time);
+    time += 1;
+    r-= 0.01;
+    g+= 0.005;
+    b+= 0.012;
+}
+
+
+//This is the main from their example. The TEST function is begun once the user clicks start recording
+function TEST(){
+  let recording = $(this).hasClass("recording");
+  if (!recording) {
+    $(this).prop("disabled", true);
+    // loads the WASM backend and runs the feature extraction
+    EssentiaWASM().then(function(essentiaWasmModule) {
+      if (!isEssentiaInstance) {
+        essentiaExtractor = new EssentiaExtractor(essentiaWasmModule);
+        isEssentiaInstance = true;
+      }
+      // start microphone stream using getUserMedia
+      startMicRecordStream(
+        audioCtx,
+        bufferSize,
+        featureExtractor, // essentia.js feature extractor callback function
+        function() {
+          // called when the promise fulfilled
+          $("#recordButton").addClass("recording");
+          $("#recordButton").html(
+            'Stop &nbsp;&nbsp;<i class="stop icon"></i>'
+          );
+          $("#recordButton").prop("disabled", false);
+        }
+      );
+    });
+  } 
+  
+  else {
+    stopMicRecordStream();
+  }
+}
+
+function loadObject(){
+  let canvas = new LoopDittyCanvas(audioObj, progressBar, processedAudio, glcanvas);
+  canvas.loadPrecomputedSong(processedAudio);
 }
