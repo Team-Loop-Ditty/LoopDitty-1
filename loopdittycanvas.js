@@ -192,19 +192,6 @@ class LoopDittyCanvas extends BaseCanvas {
                 }
                 canvas.updateBBox(X);
 
-                //Initialize time buffers (new buffer)
-                let times = canvas.audioObj.getTimesArray();
-                if (canvas.timeVBO == -1) {
-                    canvas.timeVBO = canvas.gl.createBuffer();
-                }
-                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.timeVBO);
-                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, times, canvas.gl.STATIC_DRAW);
-                canvas.timeVBO.itemSize = 1;
-                canvas.timeVBO.numItems = times.length;
-                canvas.time = 0.0;
-                canvas.thisTime = (new Date()).getTime();
-                canvas.lastTime = canvas.thisTime;
-
                 //Initialize vertex buffers
                 if (canvas.icosVBO == -1) {
                     canvas.icosVBO = canvas.gl.createBuffer();
@@ -239,44 +226,32 @@ class LoopDittyCanvas extends BaseCanvas {
 
                 let radius = canvas.lineRadius * 0.0001;
                 let res = canvas.lineRes;
-                let stride = res * 2 + 2;
+                let stride = res * 2;
                 let verts = new Float32Array(N * stride * 3);
                 for (let i = 0; i < X.length - 3; i += 3) {
                     let p1 = glMatrix.vec3.fromValues(X[i], X[i + 1], X[i + 2]);
                     let p2 = glMatrix.vec3.fromValues(X[i + 3], X[i + 4], X[i + 5]);
                     let difference = glMatrix.vec3.subtract(glMatrix.vec3.create(), p2, p1);
                     let dir = glMatrix.vec3.normalize(glMatrix.vec3.create(), difference);
-                    // orients circle using Frenet-Serret frames (TBN frames)
+                    // orients circle using Frenet-Serret frames (TNB frames)
                     let normal = glMatrix.vec3.normalize(glMatrix.vec3.create(), glMatrix.vec3.cross(glMatrix.vec3.create(), dir, glMatrix.vec3.add(glMatrix.vec3.create(), p1, p2)));
                     let binormal = glMatrix.vec3.normalize(glMatrix.vec3.create(), glMatrix.vec3.cross(glMatrix.vec3.create(), normal, dir));
                     let component1 = glMatrix.vec3.scale(glMatrix.vec3.create(), binormal, radius);
                     let component2 = glMatrix.vec3.scale(glMatrix.vec3.create(), normal, 0.0);
-
-                    // add first 2 starting verts of triangle strip
-                    let vertex = glMatrix.vec3.add(glMatrix.vec3.create(), p1, glMatrix.vec3.add(glMatrix.vec3.create(), component1, component2));
-                    verts[i * stride] = vertex[0];
-                    verts[i * stride + 1] = vertex[1];
-                    verts[i * stride + 2] = vertex[2];
-                    vertex = glMatrix.vec3.add(glMatrix.vec3.create(), vertex, difference);
-                    verts[i * stride + 3] = vertex[0];
-                    verts[i * stride + 4] = vertex[1];
-                    verts[i * stride + 5] = vertex[2];
-
-                    // complete triangle strip
                     for (let s = 0; s < res; ++s) {
-                        let xComponent = radius * Math.cos((s + 1) % res * 2 * Math.PI / res);
-                        let yComponent = radius * Math.sin((s + 1) % res * 2 * Math.PI / res);
+                        let xComponent = radius * Math.cos(s * 2 * Math.PI / res);
+                        let yComponent = radius * Math.sin(s * 2 * Math.PI / res);
                         component1 = glMatrix.vec3.scale(glMatrix.vec3.create(), binormal, xComponent);
                         component2 = glMatrix.vec3.scale(glMatrix.vec3.create(), normal, yComponent);
-                        vertex = glMatrix.vec3.add(glMatrix.vec3.create(), p1, glMatrix.vec3.add(glMatrix.vec3.create(), component1, component2));
-                        verts[i * stride + s * res + 6] = vertex[0];
-                        verts[i * stride + s * res + 7] = vertex[1];
-                        verts[i * stride + s * res + 8] = vertex[2];
+                        let vertex = glMatrix.vec3.add(glMatrix.vec3.create(), p1, glMatrix.vec3.add(glMatrix.vec3.create(), component1, component2));
+                        verts[i * stride + s * res] = vertex[0];
+                        verts[i * stride + s * res + 1] = vertex[1];
+                        verts[i * stride + s * res + 2] = vertex[2];
 
                         vertex = glMatrix.vec3.add(glMatrix.vec3.create(), vertex, difference);
-                        verts[i * stride + s * res + 9] = vertex[0];
-                        verts[i * stride + s * res + 10] = vertex[1];
-                        verts[i * stride + s * res + 11] = vertex[2];
+                        verts[i * stride + s * res + 3] = vertex[0];
+                        verts[i * stride + s * res + 4] = vertex[1];
+                        verts[i * stride + s * res + 5] = vertex[2];
                     }
                 }
 
@@ -284,6 +259,28 @@ class LoopDittyCanvas extends BaseCanvas {
                 canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, verts, canvas.gl.STATIC_DRAW);
                 canvas.pipeVBO.itemSize = 3;
                 canvas.pipeVBO.numItems = (N - 1) * stride;
+
+                //Initialize time buffers (new buffer)
+                let times = canvas.audioObj.getTimesArray();
+                if (canvas.timeVBO == -1) {
+                    canvas.timeVBO = canvas.gl.createBuffer();
+                }
+
+                // duplicate times to allow fast lookup for lines
+                // indices would probably speed this up, but the
+                // 65536 indices limit for shorts would need to be considered
+                let expand = new Float32Array(times.length * stride);
+                for (let i = 0; i < times.length; ++i) {
+                    expand.fill(times[i], i * stride, i * (stride + 1));
+                }
+
+                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.timeVBO);
+                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, expand, canvas.gl.STATIC_DRAW);
+                canvas.timeVBO.itemSize = 1;
+                canvas.timeVBO.numItems = expand.length;
+                canvas.time = 0.0;
+                canvas.thisTime = (new Date()).getTime();
+                canvas.lastTime = canvas.thisTime;
 
                 // colors are handled by a static lookup table in the vertex shader
 
@@ -340,6 +337,7 @@ class LoopDittyCanvas extends BaseCanvas {
             this.thisTime = (new Date()).getTime();
             this.time += (this.thisTime - this.lastTime)/1000.0;
             this.lastTime = this.thisTime;
+            let timeSkipStride = this.lineRes * 2;
 
             if (!this.shader.paletteSet) {
                 this.shader.paletteSet = true;
@@ -355,7 +353,7 @@ class LoopDittyCanvas extends BaseCanvas {
                 this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointVBO);
                 this.gl.vertexAttribPointer(this.shader.vOffsetAttrib, this.pointVBO.itemSize, this.gl.FLOAT, false, 0, 0);
                 this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.timeVBO);
-                this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+                this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, this.timeVBO.itemSize * timeSkipStride * 4, this.timeVBO.itemSize * 4);
                 this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.icosVBO);
                 this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.icosVBO.itemSize, this.gl.FLOAT, false, 0, 0);
                 this.instancedArrays.drawArraysInstancedANGLE(this.gl.TRIANGLES, 0, this.icosVBO.numItems, playIdx - this.delayOpts.winLength);
@@ -364,22 +362,21 @@ class LoopDittyCanvas extends BaseCanvas {
 
             //Draw "time edge" lines between points
             this.gl.uniform1f(this.shader.inflateUniform, 0.0);
-            this.gl.uniform3f(this.shader.offsetUniform, 0, 0, 0);
+            this.instancedArrays.vertexAttribDivisorANGLE(this.shader.vTimeAttrib, 0);
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pipeVBO);
             this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.pipeVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-            for (let i = 0; i < playIdx - this.delayOpts.winLength; ++i) {
-                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.timeVBO);
-                this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, 0, this.timeVBO.itemSize * i * 4);
-                this.instancedArrays.drawArraysInstancedANGLE(this.gl.TRIANGLE_STRIP, i * (this.lineRes * 2 + 2), this.lineRes * 2 + 2, 1);
-            }
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.timeVBO);
+            this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.gl.drawArrays(this.gl.TRIANGLE_STRIP, 0, (playIdx - this.delayOpts.winLength) * this.lineRes * 2);
     
             //Step 2: Draw the current point as a larger point
             this.gl.uniform1f(this.shader.inflateUniform, this.pointInflateAmount + 2.5);
+            this.instancedArrays.vertexAttribDivisorANGLE(this.shader.vTimeAttrib, 1);
             this.gl.enableVertexAttribArray(this.shader.vOffsetAttrib);
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointVBO);
             this.gl.vertexAttribPointer(this.shader.vOffsetAttrib, this.pointVBO.itemSize, this.gl.FLOAT, false, 0, this.pointVBO.itemSize * (playIdx - this.delayOpts.winLength - 1) * 4);
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.timeVBO);
-            this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, 0, this.timeVBO.itemSize * (playIdx - this.delayOpts.winLength - 1) * 4);
+            this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, 0, this.timeVBO.itemSize * (playIdx - this.delayOpts.winLength - 1) * 4 * timeSkipStride + this.timeVBO.itemSize * 4);
             this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.icosVBO);
             this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.icosVBO.itemSize, this.gl.FLOAT, false, 0, 0);
             this.instancedArrays.drawArraysInstancedANGLE(this.gl.TRIANGLES, 0, this.icosVBO.numItems, 1);
