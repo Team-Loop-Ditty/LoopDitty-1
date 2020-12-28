@@ -19,6 +19,7 @@ class LoopDittyCanvas extends BaseCanvas {
         this.audioObj.audioWidget.addEventListener("play", this.audioEventHandler.bind(this));
         this.audioObj.audioWidget.addEventListener("pause", this.audioEventHandler.bind(this));
         this.audioObj.audioWidget.addEventListener("seek", this.audioEventHandler.bind(this));
+        this.instancedArrays = this.gl.getExtension('ANGLE_instanced_arrays');
     }
 
     audioEventHandler(event) {
@@ -41,6 +42,13 @@ class LoopDittyCanvas extends BaseCanvas {
         this.displayOptsFolder.add(this, "pointInflateAmount", 0.0, 5.0, 0.25).listen().onChange(redrawDisplay);
         this.disablePoints = false;
         this.displayOptsFolder.add(this, "disablePoints").listen().onChange(redrawDisplay);
+        let redoGeom = function() {
+            canvas.updateGeometry();
+        };
+        this.lineRes = 6;
+        this.displayOptsFolder.add(this, "lineRes", 3, 20, 1).listen().onChange(redoGeom);
+        this.lineRadius = 2;
+        this.displayOptsFolder.add(this, "lineRadius", 1, 10, 1).listen().onChange(redoGeom);
         this.audioFolder = gui.addFolder("Audio Options");
         this.songName = "Untitled";
         this.audioFolder.add(this, "songName");
@@ -93,13 +101,10 @@ class LoopDittyCanvas extends BaseCanvas {
      * once the asynchronous code load completes and the shader compiles
      */
     setupShaders() {
-        this.vertexVBO = -1;
-        this.normalVBO = -1;
-        this.lineVBO = -1;
-        this.lineColorVBO = -1;
-        this.pointColorVBO = -1;
+        this.icosVBO = -1;
+        this.pointVBO = -1;
+        this.pipeVBO = -1;
         this.timeVBO = -1   // New time VBO
-        this.icosMesh = [];
         let canvas = this;
         this.shader = getShaderProgramAsync(canvas.gl, "shaders/lineSegments");
         this.shader.then(function(shader) {
@@ -107,16 +112,16 @@ class LoopDittyCanvas extends BaseCanvas {
             shader.description = 'A shader for drawing lines with a constant color';
             shader.vPosAttrib = gl.getAttribLocation(shader, "vPos");
             gl.enableVertexAttribArray(shader.vPosAttrib);
-            shader.vNormalAttrib = gl.getAttribLocation(shader, "vNormal");
-            gl.enableVertexAttribArray(shader.vNormalAttrib);
-            shader.vColorAttrib = gl.getAttribLocation(shader, "vColor");
-            gl.enableVertexAttribArray(shader.vColorAttrib);
             shader.vTimeAttrib = gl.getAttribLocation(shader, "vTime");     // New time attribute
             gl.enableVertexAttribArray(shader.vTimeAttrib);
+            shader.vOffsetAttrib = gl.getAttribLocation(shader, "vOffset");
+            gl.disableVertexAttribArray(shader.vOffsetAttrib);
             shader.pMatrixUniform = gl.getUniformLocation(shader, "uPMatrix");
             shader.mvMatrixUniform = gl.getUniformLocation(shader, "uMVMatrix");
             shader.timeUniform = gl.getUniformLocation(shader, "uTime");    // New time uniform
             shader.inflateUniform = gl.getUniformLocation(shader, "uInflate");
+            shader.paletteUniform = gl.getUniformLocation(shader, "uPalette");
+            shader.paletteSet = false;
             shader.shaderReady = true;
             canvas.shader = shader;
         });
@@ -187,103 +192,98 @@ class LoopDittyCanvas extends BaseCanvas {
                 }
                 canvas.updateBBox(X);
 
+                //Initialize vertex buffers
+                if (canvas.icosVBO == -1) {
+                    canvas.icosVBO = canvas.gl.createBuffer();
+                    let icosMesh = getIcosahedronMesh();
+                    let ind = icosMesh.getTriangleIndices();
+                    let verts = new Float32Array(ind.length * 3);
+                    for (let i = 0; i < ind.length; ++i) {
+                        let pos = icosMesh.vertices[ind[i]].pos;
+                        let v = glMatrix.vec3.scale(glMatrix.vec3.create(), pos, 0.0005);
+                        verts[i * 3] = v[0];
+                        verts[i * 3 + 1] = v[1];
+                        verts[i * 3 + 2] = v[2];
+                    }
+
+                    canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.icosVBO);
+                    canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, verts, canvas.gl.STATIC_DRAW);
+                    canvas.icosVBO.itemSize = 3;
+                    canvas.icosVBO.numItems = ind.length;
+                }
+
+                if (canvas.pointVBO == -1) {
+                    canvas.pointVBO = canvas.gl.createBuffer();
+                }
+                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.pointVBO);
+                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, X, canvas.gl.STATIC_DRAW);
+                canvas.pointVBO.itemSize = 3;
+                canvas.pointVBO.numItems = N;
+
+                if (canvas.pipeVBO == -1) {
+                    canvas.pipeVBO = canvas.gl.createBuffer();
+                }
+
+                let radius = canvas.lineRadius * 0.0001;
+                let res = canvas.lineRes;
+                let stride = res * 2;
+                let verts = new Float32Array(N * stride * 3);
+                for (let i = 0; i < X.length - 3; i += 3) {
+                    let p1 = glMatrix.vec3.fromValues(X[i], X[i + 1], X[i + 2]);
+                    let p2 = glMatrix.vec3.fromValues(X[i + 3], X[i + 4], X[i + 5]);
+                    let difference = glMatrix.vec3.subtract(glMatrix.vec3.create(), p2, p1);
+                    let dir = glMatrix.vec3.normalize(glMatrix.vec3.create(), difference);
+                    // orients circle using Frenet-Serret frames (TNB frames)
+                    let normal = glMatrix.vec3.normalize(glMatrix.vec3.create(), glMatrix.vec3.cross(glMatrix.vec3.create(), dir, glMatrix.vec3.add(glMatrix.vec3.create(), p1, p2)));
+                    let binormal = glMatrix.vec3.normalize(glMatrix.vec3.create(), glMatrix.vec3.cross(glMatrix.vec3.create(), normal, dir));
+                    let component1 = glMatrix.vec3.scale(glMatrix.vec3.create(), binormal, radius);
+                    let component2 = glMatrix.vec3.scale(glMatrix.vec3.create(), normal, 0.0);
+                    for (let s = 0; s < res; ++s) {
+                        let xComponent = radius * Math.cos(s * 2 * Math.PI / res);
+                        let yComponent = radius * Math.sin(s * 2 * Math.PI / res);
+                        component1 = glMatrix.vec3.scale(glMatrix.vec3.create(), binormal, xComponent);
+                        component2 = glMatrix.vec3.scale(glMatrix.vec3.create(), normal, yComponent);
+                        let vertex = glMatrix.vec3.add(glMatrix.vec3.create(), p1, glMatrix.vec3.add(glMatrix.vec3.create(), component1, component2));
+                        verts[i * stride + s * res] = vertex[0];
+                        verts[i * stride + s * res + 1] = vertex[1];
+                        verts[i * stride + s * res + 2] = vertex[2];
+
+                        vertex = glMatrix.vec3.add(glMatrix.vec3.create(), vertex, difference);
+                        verts[i * stride + s * res + 3] = vertex[0];
+                        verts[i * stride + s * res + 4] = vertex[1];
+                        verts[i * stride + s * res + 5] = vertex[2];
+                    }
+                }
+
+                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.pipeVBO);
+                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, verts, canvas.gl.STATIC_DRAW);
+                canvas.pipeVBO.itemSize = 3;
+                canvas.pipeVBO.numItems = (N - 1) * stride;
+
                 //Initialize time buffers (new buffer)
                 let times = canvas.audioObj.getTimesArray();
                 if (canvas.timeVBO == -1) {
                     canvas.timeVBO = canvas.gl.createBuffer();
                 }
+
+                // duplicate times to allow fast lookup for lines
+                // indices would probably speed this up, but the
+                // 65536 indices limit for shorts would need to be considered
+                let expand = new Float32Array(times.length * stride);
+                for (let i = 0; i < times.length; ++i) {
+                    expand.fill(times[i], i * stride, i * (stride + 1));
+                }
+
                 canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.timeVBO);
-                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, times, canvas.gl.STATIC_DRAW);
+                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, expand, canvas.gl.STATIC_DRAW);
+                canvas.timeVBO.itemSize = 1;
+                canvas.timeVBO.numItems = expand.length;
                 canvas.time = 0.0;
                 canvas.thisTime = (new Date()).getTime();
                 canvas.lastTime = canvas.thisTime;
 
-                //Initialize vertex buffers
-                if (canvas.vertexVBO == -1) {
-                    canvas.vertexVBO = canvas.gl.createBuffer();
-                }
+                // colors are handled by a static lookup table in the vertex shader
 
-                if (canvas.icosMesh.length == 0) {
-                    canvas.icosMesh = getIcosahedronMesh();
-                    for (let v of canvas.icosMesh.vertices) {
-                        v.pos = glMatrix.vec3.scale(v.pos, v.pos, 0.0005);
-                    }
-                }
-
-                let icos = canvas.icosMesh;
-                let ind = icos.getTriangleIndices();
-                let verts = new Float32Array(X.length * ind.length); // X.length / 3 * ind.length * 3
-                for (let i = 0; i < N; ++i) {
-                    for (let k = 0; k < ind.length; ++k) {
-                        let p = icos.vertices[ind[k]].pos;
-                        verts[i * ind.length * 3 + k * 3] = p[0] + X[i * 3];
-                        verts[i * ind.length * 3 + k * 3 + 1] = p[1] + X[i * 3 + 1];
-                        verts[i * ind.length * 3 + k * 3 + 2] = p[2] + X[i * 3 + 2];
-                    }
-                }
-                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.vertexVBO);
-                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, verts, canvas.gl.STATIC_DRAW);
-                canvas.vertexVBO.itemSize = 3;
-                canvas.vertexVBO.numItems = N * ind.length;
-
-                if (canvas.normalVBO == -1) {
-                    canvas.normalVBO = canvas.gl.createBuffer();
-                }
-
-                let normals = new Float32Array(X.length * ind.length);
-                let normList = [];
-                for (let i = 0; i < icos.vertices.length; ++i) {
-                    normList[i] = icos.vertices[i].getNormal();
-                }
-
-                for (let i = 0; i < N; ++i) {
-                    for (let k = 0; k < ind.length; ++k) {
-                        let n = normList[ind[k]];
-                        normals[i * ind.length * 3 + k * 3] = n[0];
-                        normals[i * ind.length * 3 + k * 3 + 1] = n[1];
-                        normals[i * ind.length * 3 + k * 3 + 2] = n[2];
-                    }
-                }
-                
-                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.normalVBO);
-                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, normals, canvas.gl.STATIC_DRAW);
-                canvas.normalVBO.itemSize = 3;
-                canvas.normalVBO.numItems = N * ind.length;
-
-                if (canvas.lineVBO == -1) {
-                    canvas.lineVBO = canvas.gl.createBuffer();
-                }
-                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.lineVBO);
-                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, X, canvas.gl.STATIC_DRAW);
-                canvas.lineVBO.itemSize = 3;
-                canvas.lineVBO.numItems = N;
-
-                //Initialize color buffers
-                let colors = canvas.audioObj.getColorsArray();
-                if (canvas.lineColorVBO == -1) {
-                    canvas.lineColorVBO = canvas.gl.createBuffer();
-                }
-                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.lineColorVBO);
-                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, colors, canvas.gl.STATIC_DRAW);
-                canvas.lineColorVBO.itemSize = 3; 
-                canvas.lineColorVBO.numItems = N;
-
-                let expand = new Float32Array(verts.length * 3);
-                for (let i = 0; i < colors.length / 3; ++i) {
-                    for (let k = 0; k < ind.length; ++k) {
-                        expand[i * ind.length * 3 + k * 3] = colors[i * 3];
-                        expand[i * ind.length * 3 + k * 3 + 1] = colors[i * 3 + 1];
-                        expand[i * ind.length * 3 + k * 3 + 2] = colors[i * 3 + 2];
-                    }
-                }
-
-                if (canvas.pointColorVBO == -1) {
-                    canvas.pointColorVBO = canvas.gl.createBuffer();
-                }
-                canvas.gl.bindBuffer(canvas.gl.ARRAY_BUFFER, canvas.pointColorVBO);
-                canvas.gl.bufferData(canvas.gl.ARRAY_BUFFER, expand, canvas.gl.STATIC_DRAW);
-                canvas.pointColorVBO.itemSize = 3; 
-                canvas.pointColorVBO.numItems = N * ind.length;
                 canvas.progressBar.changeToReady();
                 requestAnimationFrame(canvas.repaint.bind(canvas));
             });
@@ -328,7 +328,7 @@ class LoopDittyCanvas extends BaseCanvas {
             // Wait until the promise has resolved, then draw again
             this.shader.then(canvas.repaint.bind(canvas));
         }
-        else if (this.vertexVBO != -1 && this.normalVBO != -1 && this.lineVBO != -1 && this.pointColorVBO != -1 && this.lineColorVBO != -1 && playIdx > this.delayOpts.winLength - 1) {
+        else if (playIdx > this.delayOpts.winLength - 1) { // don't need to check VBOs since they should all be set up if shaderReady
             this.gl.useProgram(this.shader);
             this.gl.uniformMatrix4fv(this.shader.pMatrixUniform, false, this.camera.getPMatrix());
             this.gl.uniformMatrix4fv(this.shader.mvMatrixUniform, false, this.camera.getMVMatrix());
@@ -337,38 +337,50 @@ class LoopDittyCanvas extends BaseCanvas {
             this.thisTime = (new Date()).getTime();
             this.time += (this.thisTime - this.lastTime)/1000.0;
             this.lastTime = this.thisTime;
-            this.gl.uniform1f(this.shader.timeUniform, this.time);
+            let timeSkipStride = this.lineRes * 2;
+
+            if (!this.shader.paletteSet) {
+                this.shader.paletteSet = true;
+                this.gl.uniform3fv(this.shader.paletteUniform, canvas.makePaletteArray());
+                this.gl.uniform1f(this.shader.timeUniform, this.audioObj.times[this.audioObj.times.length - 1]);
+                this.instancedArrays.vertexAttribDivisorANGLE(this.shader.vOffsetAttrib, 1);
+                this.instancedArrays.vertexAttribDivisorANGLE(this.shader.vTimeAttrib, 1);
+            }
 
             //Step 1: Draw all points unsaturated
             if (!this.disablePoints) {
-                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexVBO);
-                this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.vertexVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalVBO);
-                this.gl.vertexAttribPointer(this.shader.vNormalAttrib, this.normalVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointColorVBO);
-                this.gl.vertexAttribPointer(this.shader.vColorAttrib, this.pointColorVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-                this.gl.drawArrays(this.gl.TRIANGLES, 0, (playIdx - this.delayOpts.winLength) * 60 - 60); // 60 = 20 triangles * 3 vertices
+                this.gl.enableVertexAttribArray(this.shader.vOffsetAttrib);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointVBO);
+                this.gl.vertexAttribPointer(this.shader.vOffsetAttrib, this.pointVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.timeVBO);
+                this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, this.timeVBO.itemSize * timeSkipStride * 4, this.timeVBO.itemSize * 4);
+                this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.icosVBO);
+                this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.icosVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+                this.instancedArrays.drawArraysInstancedANGLE(this.gl.TRIANGLES, 0, this.icosVBO.numItems, playIdx - this.delayOpts.winLength);
+                this.gl.disableVertexAttribArray(this.shader.vOffsetAttrib);
             }
 
             //Draw "time edge" lines between points
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.lineVBO);
-            this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.lineVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.lineColorVBO);
-            this.gl.vertexAttribPointer(this.shader.vColorAttrib, this.lineColorVBO.itemSize, this.gl.FLOAT, false, 0, 0);
             this.gl.uniform1f(this.shader.inflateUniform, 0.0);
-            // this gave me webgl warnings before by going out of bounds by at least 1 - is this right now?
-            this.gl.drawArrays(this.gl.LINES, 0, playIdx - this.delayOpts.winLength);
-            this.gl.drawArrays(this.gl.LINES, 1, playIdx - this.delayOpts.winLength);
+            this.instancedArrays.vertexAttribDivisorANGLE(this.shader.vTimeAttrib, 0);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pipeVBO);
+            this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.pipeVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.timeVBO);
+            this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.gl.drawArrays(this.gl.TRIANGLE_STRIP, 0, (playIdx - this.delayOpts.winLength) * this.lineRes * 2);
     
             //Step 2: Draw the current point as a larger point
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.vertexVBO);
-            this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.vertexVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.normalVBO);
-            this.gl.vertexAttribPointer(this.shader.vNormalAttrib, this.normalVBO.itemSize, this.gl.FLOAT, false, 0, 0);
-            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointColorVBO);
-            this.gl.vertexAttribPointer(this.shader.vColorAttrib, this.pointColorVBO.itemSize, this.gl.FLOAT, false, 0, 0);
             this.gl.uniform1f(this.shader.inflateUniform, this.pointInflateAmount + 2.5);
-            this.gl.drawArrays(this.gl.TRIANGLES, (playIdx - this.delayOpts.winLength) * 60, 60);
+            this.instancedArrays.vertexAttribDivisorANGLE(this.shader.vTimeAttrib, 1);
+            this.gl.enableVertexAttribArray(this.shader.vOffsetAttrib);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.pointVBO);
+            this.gl.vertexAttribPointer(this.shader.vOffsetAttrib, this.pointVBO.itemSize, this.gl.FLOAT, false, 0, this.pointVBO.itemSize * (playIdx - this.delayOpts.winLength - 1) * 4);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.timeVBO);
+            this.gl.vertexAttribPointer(this.shader.vTimeAttrib, this.timeVBO.itemSize, this.gl.FLOAT, false, 0, this.timeVBO.itemSize * (playIdx - this.delayOpts.winLength - 1) * 4 * timeSkipStride + this.timeVBO.itemSize * 4);
+            this.gl.bindBuffer(this.gl.ARRAY_BUFFER, this.icosVBO);
+            this.gl.vertexAttribPointer(this.shader.vPosAttrib, this.icosVBO.itemSize, this.gl.FLOAT, false, 0, 0);
+            this.instancedArrays.drawArraysInstancedANGLE(this.gl.TRIANGLES, 0, this.icosVBO.numItems, 1);
+            this.gl.disableVertexAttribArray(this.shader.vOffsetAttrib);
         }
     }
 
@@ -384,5 +396,266 @@ class LoopDittyCanvas extends BaseCanvas {
         else {
             this.repaintOnInteract = true;
         }
+    }
+
+    makePaletteArray() {
+        return Float32Array.of(
+            0.62, 0.00392, 0.259,
+            0.628, 0.0133, 0.261,
+            0.637, 0.0227, 0.263,
+            0.645, 0.0321, 0.265,
+            0.653, 0.0414, 0.267,
+            0.662, 0.0508, 0.269,
+            0.67, 0.0602, 0.271,
+            0.679, 0.0696, 0.273,
+            0.687, 0.079, 0.275,
+            0.696, 0.0884, 0.277,
+            0.704, 0.0977, 0.279,
+            0.713, 0.107, 0.281,
+            0.721, 0.116, 0.283,
+            0.73, 0.126, 0.285,
+            0.738, 0.135, 0.287,
+            0.746, 0.145, 0.289,
+            0.755, 0.154, 0.291,
+            0.763, 0.163, 0.293,
+            0.772, 0.173, 0.295,
+            0.78, 0.182, 0.297,
+            0.789, 0.192, 0.299,
+            0.797, 0.201, 0.301,
+            0.806, 0.21, 0.303,
+            0.814, 0.22, 0.305,
+            0.823, 0.229, 0.307,
+            0.831, 0.238, 0.309,
+            0.838, 0.247, 0.309,
+            0.842, 0.254, 0.307,
+            0.847, 0.261, 0.305,
+            0.852, 0.268, 0.303,
+            0.857, 0.276, 0.301,
+            0.862, 0.283, 0.3,
+            0.866, 0.29, 0.298,
+            0.871, 0.297, 0.296,
+            0.876, 0.305, 0.294,
+            0.881, 0.312, 0.292,
+            0.885, 0.319, 0.29,
+            0.89, 0.326, 0.289,
+            0.895, 0.333, 0.287,
+            0.9, 0.341, 0.285,
+            0.904, 0.348, 0.283,
+            0.909, 0.355, 0.281,
+            0.914, 0.362, 0.279,
+            0.919, 0.37, 0.278,
+            0.923, 0.377, 0.276,
+            0.928, 0.384, 0.274,
+            0.933, 0.391, 0.272,
+            0.938, 0.399, 0.27,
+            0.943, 0.406, 0.268,
+            0.947, 0.413, 0.266,
+            0.952, 0.42, 0.265,
+            0.957, 0.427, 0.263,
+            0.958, 0.437, 0.267,
+            0.96, 0.447, 0.272,
+            0.961, 0.457, 0.277,
+            0.962, 0.467, 0.281,
+            0.964, 0.477, 0.286,
+            0.965, 0.487, 0.29,
+            0.967, 0.497, 0.295,
+            0.968, 0.507, 0.3,
+            0.969, 0.517, 0.304,
+            0.971, 0.527, 0.309,
+            0.972, 0.537, 0.313,
+            0.973, 0.547, 0.318,
+            0.975, 0.557, 0.323,
+            0.976, 0.567, 0.327,
+            0.978, 0.577, 0.332,
+            0.979, 0.587, 0.337,
+            0.98, 0.597, 0.341,
+            0.982, 0.607, 0.346,
+            0.983, 0.617, 0.35,
+            0.985, 0.627, 0.355,
+            0.986, 0.637, 0.36,
+            0.987, 0.647, 0.364,
+            0.989, 0.657, 0.369,
+            0.99, 0.667, 0.373,
+            0.991, 0.677, 0.378,
+            0.992, 0.686, 0.384,
+            0.992, 0.694, 0.39,
+            0.993, 0.702, 0.397,
+            0.993, 0.709, 0.403,
+            0.993, 0.717, 0.409,
+            0.993, 0.725, 0.416,
+            0.993, 0.732, 0.422,
+            0.993, 0.74, 0.429,
+            0.993, 0.748, 0.435,
+            0.994, 0.755, 0.442,
+            0.994, 0.763, 0.448,
+            0.994, 0.771, 0.455,
+            0.994, 0.778, 0.461,
+            0.994, 0.786, 0.468,
+            0.994, 0.794, 0.474,
+            0.995, 0.802, 0.481,
+            0.995, 0.809, 0.487,
+            0.995, 0.817, 0.493,
+            0.995, 0.825, 0.5,
+            0.995, 0.832, 0.506,
+            0.995, 0.84, 0.513,
+            0.995, 0.848, 0.519,
+            0.996, 0.855, 0.526,
+            0.996, 0.863, 0.532,
+            0.996, 0.871, 0.539,
+            0.996, 0.878, 0.545,
+            0.996, 0.883, 0.553,
+            0.996, 0.888, 0.561,
+            0.997, 0.893, 0.569,
+            0.997, 0.898, 0.577,
+            0.997, 0.902, 0.585,
+            0.997, 0.907, 0.593,
+            0.997, 0.912, 0.601,
+            0.997, 0.917, 0.609,
+            0.997, 0.921, 0.617,
+            0.998, 0.926, 0.625,
+            0.998, 0.931, 0.633,
+            0.998, 0.936, 0.641,
+            0.998, 0.94, 0.649,
+            0.998, 0.945, 0.657,
+            0.998, 0.95, 0.665,
+            0.999, 0.955, 0.673,
+            0.999, 0.959, 0.681,
+            0.999, 0.964, 0.689,
+            0.999, 0.969, 0.697,
+            0.999, 0.974, 0.705,
+            0.999, 0.979, 0.713,
+            0.999, 0.983, 0.721,
+            1, 0.988, 0.729,
+            1, 0.993, 0.737,
+            1, 0.998, 0.745,
+            0.998, 0.999, 0.746,
+            0.994, 0.998, 0.74,
+            0.99, 0.996, 0.734,
+            0.987, 0.995, 0.728,
+            0.983, 0.993, 0.722,
+            0.979, 0.992, 0.716,
+            0.975, 0.99, 0.71,
+            0.971, 0.988, 0.704,
+            0.967, 0.987, 0.698,
+            0.963, 0.985, 0.692,
+            0.96, 0.984, 0.686,
+            0.956, 0.982, 0.68,
+            0.952, 0.981, 0.674,
+            0.948, 0.979, 0.668,
+            0.944, 0.978, 0.662,
+            0.94, 0.976, 0.656,
+            0.937, 0.975, 0.65,
+            0.933, 0.973, 0.644,
+            0.929, 0.972, 0.638,
+            0.925, 0.97, 0.632,
+            0.921, 0.968, 0.626,
+            0.917, 0.967, 0.62,
+            0.913, 0.965, 0.614,
+            0.91, 0.964, 0.608,
+            0.906, 0.962, 0.602,
+            0.902, 0.961, 0.596,
+            0.893, 0.957, 0.598,
+            0.884, 0.953, 0.6,
+            0.875, 0.95, 0.602,
+            0.866, 0.946, 0.603,
+            0.857, 0.942, 0.605,
+            0.848, 0.939, 0.607,
+            0.838, 0.935, 0.609,
+            0.829, 0.931, 0.611,
+            0.82, 0.928, 0.613,
+            0.811, 0.924, 0.615,
+            0.802, 0.92, 0.616,
+            0.793, 0.916, 0.618,
+            0.784, 0.913, 0.62,
+            0.775, 0.909, 0.622,
+            0.766, 0.905, 0.624,
+            0.757, 0.902, 0.626,
+            0.748, 0.898, 0.627,
+            0.739, 0.894, 0.629,
+            0.73, 0.891, 0.631,
+            0.72, 0.887, 0.633,
+            0.711, 0.883, 0.635,
+            0.702, 0.88, 0.637,
+            0.693, 0.876, 0.639,
+            0.684, 0.872, 0.64,
+            0.675, 0.869, 0.642,
+            0.665, 0.865, 0.643,
+            0.655, 0.86, 0.643,
+            0.644, 0.856, 0.644,
+            0.633, 0.852, 0.644,
+            0.623, 0.848, 0.644,
+            0.612, 0.844, 0.644,
+            0.602, 0.84, 0.644,
+            0.591, 0.836, 0.644,
+            0.58, 0.831, 0.644,
+            0.57, 0.827, 0.645,
+            0.559, 0.823, 0.645,
+            0.549, 0.819, 0.645,
+            0.538, 0.815, 0.645,
+            0.527, 0.811, 0.645,
+            0.517, 0.806, 0.645,
+            0.506, 0.802, 0.646,
+            0.496, 0.798, 0.646,
+            0.485, 0.794, 0.646,
+            0.474, 0.79, 0.646,
+            0.464, 0.786, 0.646,
+            0.453, 0.782, 0.646,
+            0.442, 0.777, 0.646,
+            0.432, 0.773, 0.647,
+            0.421, 0.769, 0.647,
+            0.411, 0.765, 0.647,
+            0.4, 0.761, 0.647,
+            0.392, 0.752, 0.651,
+            0.384, 0.743, 0.654,
+            0.376, 0.734, 0.658,
+            0.368, 0.725, 0.662,
+            0.36, 0.716, 0.666,
+            0.352, 0.707, 0.669,
+            0.344, 0.698, 0.673,
+            0.336, 0.689, 0.677,
+            0.328, 0.681, 0.68,
+            0.32, 0.672, 0.684,
+            0.312, 0.663, 0.688,
+            0.304, 0.654, 0.691,
+            0.296, 0.645, 0.695,
+            0.288, 0.636, 0.699,
+            0.28, 0.627, 0.702,
+            0.272, 0.618, 0.706,
+            0.264, 0.609, 0.71,
+            0.256, 0.6, 0.713,
+            0.248, 0.591, 0.717,
+            0.24, 0.582, 0.721,
+            0.232, 0.573, 0.725,
+            0.224, 0.565, 0.728,
+            0.216, 0.556, 0.732,
+            0.208, 0.547, 0.736,
+            0.2, 0.538, 0.739,
+            0.199, 0.529, 0.739,
+            0.206, 0.52, 0.735,
+            0.213, 0.511, 0.731,
+            0.22, 0.503, 0.727,
+            0.227, 0.494, 0.722,
+            0.233, 0.485, 0.718,
+            0.24, 0.476, 0.714,
+            0.247, 0.468, 0.71,
+            0.254, 0.459, 0.706,
+            0.26, 0.45, 0.702,
+            0.267, 0.441, 0.698,
+            0.274, 0.433, 0.693,
+            0.281, 0.424, 0.689,
+            0.287, 0.415, 0.685,
+            0.294, 0.406, 0.681,
+            0.301, 0.397, 0.677,
+            0.308, 0.389, 0.673,
+            0.314, 0.38, 0.669,
+            0.321, 0.371, 0.664,
+            0.328, 0.362, 0.66,
+            0.335, 0.354, 0.656,
+            0.342, 0.345, 0.652,
+            0.348, 0.336, 0.648,
+            0.355, 0.327, 0.644,
+            0.362, 0.319, 0.639,
+            0.369, 0.31, 0.635
+        );
     }
 }
